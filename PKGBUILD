@@ -2,7 +2,7 @@
 
 _pkgname=labwc
 pkgname=labwc-im-git
-pkgver=0.7.1.r132.ga109e6e3
+pkgver=0.7.1.r152.gabd8e971
 pkgrel=1
 pkgdesc='stacking wayland compositor with look and feel from openbox (git version with minimal text-input-v1 support)'
 url="https://github.com/labwc/labwc"
@@ -14,9 +14,11 @@ optdepends=("bemenu: default launcher via Alt+F3")
 conflicts=(labwc)
 provides=(labwc)
 source=("git+https://github.com/labwc/${_pkgname}.git"
-        '0001-IME-support-text-input-v1.patch')
+        '0001-IME-support-text-input-v1.patch'
+        '0002-seat-fall-back-to-keyboard-group-when-no-keyboard-is.patch')
 md5sums=('SKIP'
-         'f87290362a7719025c745161266e7566')
+         '284580cc0a2b1ccf92d2f2d2d6861192'
+         'e08d92d689e3e37d97f9914384303e9f')
 
 pkgver() {
   cd "$_pkgname"
@@ -26,6 +28,7 @@ pkgver() {
 prepare() {
   cd "$_pkgname"
   patch -Np1 -i ../0001-IME-support-text-input-v1.patch
+  patch -Np1 -i ../0002-seat-fall-back-to-keyboard-group-when-no-keyboard-is.patch
 }
 
 build() {

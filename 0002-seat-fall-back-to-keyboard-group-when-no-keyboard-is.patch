@@ -1,0 +1,37 @@
+From d2eb87e7f5bd9fccdb096403065298718162175b Mon Sep 17 00:00:00 2001
+From: tokyo4j <hrak1529@gmail.com>
+Date: Mon, 6 May 2024 23:53:18 +0900
+Subject: [PATCH] seat: fall back to keyboard group when no keyboard is active
+
+---
+ src/seat.c | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/src/seat.c b/src/seat.c
+index 816e58dd..b808b336 100644
+--- a/src/seat.c
++++ b/src/seat.c
+@@ -31,6 +31,20 @@ input_device_destroy(struct wl_listener *listener, void *data)
+ 		wl_list_remove(&keyboard->key.link);
+ 		wl_list_remove(&keyboard->modifier.link);
+ 		keyboard_cancel_keybind_repeat(keyboard);
++		/*
++		 * When active (especially virtual) keyboard is NULL,
++		 * wlroots no longer replies to "wl_keyboard.get_keyboard"
++		 * requests with "wl_keyboard.keymap" events.
++		 * Since sending "wl_keyboard.modifier" event before
++		 * "wl_keyboard.keymap" can crash some apps like slurp or
++		 * Chromium, we set the keyboard from the keyboard
++		 * group so that the active keyboard doesn't become NULL.
++		 */
++		struct seat *seat = input->seat;
++		if (!seat->seat->keyboard_state.keyboard) {
++			wlr_seat_set_keyboard(seat->seat,
++				&seat->keyboard_group->keyboard);
++		}
+ 	}
+ 	free(input);
+ }
+-- 
+2.45.0
+
