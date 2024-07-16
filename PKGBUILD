@@ -2,13 +2,13 @@
 
 _pkgname=labwc
 pkgname=labwc-im-git
-pkgver=0.7.1.r155.gcafdcd8e
+pkgver=0.7.3.r4.g7dd7b5cc
 pkgrel=1
 pkgdesc='stacking wayland compositor with look and feel from openbox (git version with minimal text-input-v1 support)'
 url="https://github.com/labwc/labwc"
 arch=('x86_64')
 license=('GPL2')
-depends=('libpng' 'librsvg' 'pango' 'seatd' 'wlroots>=0.17' 'wlroots<0.18' 'wayland' 'xorg-xwayland')
+depends=('libpng' 'librsvg' 'pango' 'seatd' 'libwlroots.so=12-64' 'wayland' 'xorg-xwayland')
 makedepends=('git' 'meson' 'scdoc' 'wayland-protocols')
 optdepends=("bemenu: default launcher via Alt+F3")
 conflicts=(labwc)
@@ -29,6 +29,7 @@ prepare() {
 }
 
 build() {
+  export PKG_CONFIG_PATH='/usr/lib/wlroots0.17/pkgconfig'
   arch-meson -Dman-pages=enabled "$_pkgname" build
   meson compile -C build
 }
