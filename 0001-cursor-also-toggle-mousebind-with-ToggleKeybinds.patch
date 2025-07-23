@@ -1,0 +1,62 @@
+From 5e46df4523a75e40ee740fad9b3835691898e165 Mon Sep 17 00:00:00 2001
+From: tokyo4j <hrak1529@gmail.com>
+Date: Mon, 22 Jul 2024 20:34:14 +0900
+Subject: [PATCH] cursor: also toggle mousebind with ToggleKeybinds
+
+---
+ src/input/cursor.c | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/src/input/cursor.c b/src/input/cursor.c
+index c5f9e4ae..052afadd 100644
+--- a/src/input/cursor.c
++++ b/src/input/cursor.c
+@@ -582,6 +582,15 @@ cursor_get_resize_edges(struct wlr_cursor *cursor, struct cursor_context *ctx)
+ 	return resize_edges;
+ }
+ 
++static bool
++should_ignore_mousebind(struct cursor_context *ctx, struct mousebind *mousebind)
++{
++	return ctx->type == LAB_SSD_CLIENT &&
++		ctx->view->server->seat.nr_inhibited_keybind_views &&
++		ctx->view->inhibits_keybinds &&
++		!actions_contain_toggle_keybinds(&mousebind->actions);
++}
++
+ bool
+ cursor_process_motion(struct server *server, uint32_t time, double *sx, double *sy)
+ {
+@@ -612,6 +621,9 @@ cursor_process_motion(struct server *server, uint32_t time, double *sx, double *
+ 	wl_list_for_each(mousebind, &rc.mousebinds, link) {
+ 		if (mousebind->mouse_event == MOUSE_ACTION_DRAG
+ 				&& mousebind->pressed_in_context) {
++			if (should_ignore_mousebind(&ctx, mousebind)) {
++				continue;
++			}
+ 			/*
+ 			 * Use view and resize edges from the press
+ 			 * event (not the motion event) to prevent
+@@ -952,6 +964,9 @@ process_release_mousebinding(struct server *server,
+ 		if (ssd_part_contains(mousebind->context, ctx->type)
+ 				&& mousebind->button == button
+ 				&& modifiers == mousebind->modifiers) {
++			if (should_ignore_mousebind(ctx, mousebind)) {
++				continue;
++			}
+ 			switch (mousebind->mouse_event) {
+ 			case MOUSE_ACTION_RELEASE:
+ 				break;
+@@ -1019,6 +1034,9 @@ process_press_mousebinding(struct server *server, struct cursor_context *ctx,
+ 		if (ssd_part_contains(mousebind->context, ctx->type)
+ 				&& mousebind->button == button
+ 				&& modifiers == mousebind->modifiers) {
++			if (should_ignore_mousebind(ctx, mousebind)) {
++				continue;
++			}
+ 			switch (mousebind->mouse_event) {
+ 			case MOUSE_ACTION_DRAG: /* fallthrough */
+ 			case MOUSE_ACTION_CLICK:
+-- 
+2.50.1
+
