@@ -1,0 +1,2075 @@
+diff --git a/include/node.h b/include/node.h
+index 80d03e9f..708e7835 100644
+--- a/include/node.h
++++ b/include/node.h
+@@ -21,7 +21,7 @@ enum node_descriptor_type {
+ 	LAB_NODE_DESC_MENUITEM,
+ 	LAB_NODE_DESC_TREE,
+ 	LAB_NODE_DESC_SCALED_SCENE_BUFFER,
+-	LAB_NODE_DESC_SSD_BUTTON,
++	LAB_NODE_DESC_SSD_PART,
+ };
+ 
+ struct node_descriptor {
+@@ -44,7 +44,7 @@ struct node_descriptor {
+  *   - LAB_NODE_DESC_LAYER_SURFACE  struct lab_layer_surface
+  *   - LAB_NODE_DESC_LAYER_POPUP    struct lab_layer_popup
+  *   - LAB_NODE_DESC_MENUITEM       struct menuitem
+- *   - LAB_NODE_DESC_SSD_BUTTON     struct ssd_button
++ *   - LAB_NODE_DESC_SSD_PART       struct ssd_part
+  */
+ void node_descriptor_create(struct wlr_scene_node *scene_node,
+ 	enum node_descriptor_type type, void *data);
+@@ -77,10 +77,10 @@ struct menuitem *node_menuitem_from_node(
+ 	struct wlr_scene_node *wlr_scene_node);
+ 
+ /**
+- * node_ssd_button_from_node - return ssd_button struct from node
++ * node_ssd_part_from_node - return ssd_part struct from node
+  * @wlr_scene_node: wlr_scene_node from which to return data
+  */
+-struct ssd_button *node_ssd_button_from_node(
++struct ssd_part *node_ssd_part_from_node(
+ 	struct wlr_scene_node *wlr_scene_node);
+ 
+ /**
+diff --git a/include/ssd-internal.h b/include/ssd-internal.h
+index ec64311e..731828e6 100644
+--- a/include/ssd-internal.h
++++ b/include/ssd-internal.h
+@@ -3,21 +3,10 @@
+ #define LABWC_SSD_INTERNAL_H
+ 
+ #include <wlr/util/box.h>
+-#include "common/macros.h"
+ #include "ssd.h"
+ #include "view.h"
+ 
+-#define FOR_EACH(tmp, ...) \
+-{ \
+-	__typeof__(tmp) _x[] = { __VA_ARGS__, NULL }; \
+-	size_t _i = 0; \
+-	for ((tmp) = _x[_i]; _i < ARRAY_SIZE(_x) - 1; (tmp) = _x[++_i])
+-
+-#define FOR_EACH_END }
+-
+ struct ssd_button {
+-	struct view *view;
+-	enum ssd_part_type type;
+ 	/*
+ 	 * Bitmap of lab_button_state that represents a combination of
+ 	 * hover/toggled/rounded states.
+@@ -28,19 +17,13 @@ struct ssd_button {
+ 	 * img_buffers[state_set] is displayed. Some of these can be NULL
+ 	 * (e.g. img_buffers[LAB_BS_ROUNDED] is set only for corner buttons).
+ 	 *
+-	 * When "type" is LAB_SSD_BUTTON_WINDOW_ICON, these are all NULL and
+-	 * window_icon is used instead.
++	 * When the type of ssd_part pointing to ssd_button is
++	 * LAB_SSD_BUTTON_WINDOW_ICON, these are all NULL and window_icon is
++	 * used instead.
+ 	 */
+ 	struct scaled_img_buffer *img_buffers[LAB_BS_ALL + 1];
+ 
+ 	struct scaled_icon_buffer *window_icon;
+-
+-	struct wl_listener destroy;
+-};
+-
+-struct ssd_sub_tree {
+-	struct wlr_scene_tree *tree;
+-	struct wl_list parts; /* ssd_part.link */
+ };
+ 
+ struct ssd_state_title_width {
+@@ -48,6 +31,44 @@ struct ssd_state_title_width {
+ 	bool truncated;
+ };
+ 
++/*
++ * The scene-graph of SSD looks like below. The parentheses indicate the type of
++ * ssd_part attached to the node.
++ *
++ * ssd->tree (LAB_SSD_NONE)
++ * +--titlebar (LAB_SSD_PART_TITLEBAR)
++ * |  +--inactive
++ * |  |  +--background bar
++ * |  |  +--left corner
++ * |  |  +--right corner
++ * |  |  +--title (LAB_SSD_PART_TITLE)
++ * |  |  +--iconify button (LAB_SSD_BUTTON_ICONIFY)
++ * |  |  |  +--normal close icon image
++ * |  |  |  +--hovered close icon image
++ * |  |  |  +--...
++ * |  |  +--window icon (LAB_SSD_BUTTON_WINDOW_ICON)
++ * |  |  |  +--window icon image
++ * |  |  +--...
++ * |  +--active
++ * |     +--...
++ * +--border
++ * |  +--inactive
++ * |  |  +--top
++ * |  |  +--...
++ * |  +--active
++ * |     +--top
++ * |     +--...
++ * +--shadow
++ * |  +--inactive
++ * |  |  +--top
++ * |  |  +--...
++ * |  +--active
++ * |     +--top
++ * |     +--...
++ * +--extents
++ *    +--top
++ *    +--...
++ */
+ struct ssd {
+ 	struct view *view;
+ 	struct wlr_scene_tree *tree;
+@@ -80,33 +101,51 @@ struct ssd {
+ 		struct wlr_box geometry;
+ 		struct ssd_state_title {
+ 			char *text;
+-			struct ssd_state_title_width active;
+-			struct ssd_state_title_width inactive;
++			/* indexed by enum ssd_active_state */
++			struct ssd_state_title_width dstates[2];
+ 		} title;
++
++		char *app_id;
+ 	} state;
+ 
+ 	/* An invisible area around the view which allows resizing */
+-	struct ssd_sub_tree extents;
++	struct ssd_extents_scene {
++		struct wlr_scene_tree *tree;
++		struct wlr_scene_rect *top, *bottom, *left, *right;
++	} extents;
+ 
+ 	/* The top of the view, containing buttons, title, .. */
+-	struct {
++	struct ssd_titlebar_scene {
+ 		int height;
+ 		struct wlr_scene_tree *tree;
+-		struct ssd_sub_tree active;
+-		struct ssd_sub_tree inactive;
++		struct ssd_titlebar_subtree {
++			struct wlr_scene_tree *tree;
++			struct wlr_scene_buffer *corner_left;
++			struct wlr_scene_buffer *corner_right;
++			struct wlr_scene_buffer *bar;
++			struct scaled_font_buffer *title;
++			/* List of ssd_parts that represent buttons */
++			struct wl_list buttons_left;
++			struct wl_list buttons_right;
++		} subtrees[2]; /* indexed by enum ssd_active_state */
+ 	} titlebar;
+ 
+ 	/* Borders allow resizing as well */
+-	struct {
++	struct ssd_border_scene {
+ 		struct wlr_scene_tree *tree;
+-		struct ssd_sub_tree active;
+-		struct ssd_sub_tree inactive;
++		struct ssd_border_subtree {
++			struct wlr_scene_tree *tree;
++			struct wlr_scene_rect *top, *bottom, *left, *right;
++		} subtrees[2]; /* indexed by enum ssd_active_state */
+ 	} border;
+ 
+-	struct {
++	struct ssd_shadow_scene {
+ 		struct wlr_scene_tree *tree;
+-		struct ssd_sub_tree active;
+-		struct ssd_sub_tree inactive;
++		struct ssd_shadow_subtree {
++			struct wlr_scene_tree *tree;
++			struct wlr_scene_buffer *top, *bottom, *left, *right,
++				*top_left, *top_right, *bottom_left, *bottom_right;
++		} subtrees[2]; /* indexed by enum ssd_active_state */
+ 	} shadow;
+ 
+ 	/*
+@@ -117,16 +156,23 @@ struct ssd {
+ 	struct border margin;
+ };
+ 
++/*
++ * ssd_part wraps a scene-node with ssd-specific information and can be
++ * accessed with node_ssd_part_from_node(wlr_scene_node *).
++ * This allows get_cursor_context() in desktop.c to see which SSD part is under
++ * the cursor.
++ */
+ struct ssd_part {
+ 	enum ssd_part_type type;
+-
+-	/* Buffer pointer. May be NULL */
+-	struct scaled_font_buffer *buffer;
++	struct view *view;
+ 
+ 	/* This part represented in scene graph */
+ 	struct wlr_scene_node *node;
++	struct wl_listener node_destroy;
+ 
+-	struct wl_list link;
++	/* Set when type == LAB_SSD_BUTTON_* */
++	struct ssd_button *button;
++	struct wl_list link; /* ssd_titlebar_subtree.buttons_{left,right} */
+ };
+ 
+ struct ssd_hover_state {
+@@ -138,26 +184,13 @@ struct wlr_buffer;
+ struct wlr_scene_tree;
+ 
+ /* SSD internal helpers to create various SSD elements */
+-/* TODO: Replace some common args with a struct */
+-struct ssd_part *add_scene_part(
+-	struct wl_list *part_list, enum ssd_part_type type);
+-struct ssd_part *add_scene_rect(
+-	struct wl_list *list, enum ssd_part_type type,
+-	struct wlr_scene_tree *parent, int width, int height, int x, int y,
+-	float color[4]);
+-struct ssd_part *add_scene_buffer(
+-	struct wl_list *list, enum ssd_part_type type,
+-	struct wlr_scene_tree *parent, struct wlr_buffer *buffer, int x, int y);
+-struct ssd_part *add_scene_button(struct wl_list *part_list,
++struct ssd_part *add_scene_part(enum ssd_part_type type, struct view *view,
++	struct wlr_scene_node *node);
++struct ssd_part *add_scene_button(struct wl_list *button_parts,
+ 	enum ssd_part_type type, struct wlr_scene_tree *parent,
+-	struct lab_img *buffers[LAB_BS_ALL + 1], int x, int y,
++	struct lab_img *imgs[LAB_BS_ALL + 1], int x, int y,
+ 	struct view *view);
+ 
+-/* SSD internal helpers */
+-struct ssd_part *ssd_get_part(
+-	struct wl_list *part_list, enum ssd_part_type type);
+-void ssd_destroy_parts(struct wl_list *list);
+-
+ /* SSD internal */
+ void ssd_titlebar_create(struct ssd *ssd);
+ void ssd_titlebar_update(struct ssd *ssd);
+diff --git a/include/ssd.h b/include/ssd.h
+index eda0370e..599e77cb 100644
+--- a/include/ssd.h
++++ b/include/ssd.h
+@@ -5,6 +5,13 @@
+ #include <wayland-server-core.h>
+ #include "common/border.h"
+ 
++enum ssd_active_state {
++	SSD_INACTIVE = 0,
++	SSD_ACTIVE = 1,
++};
++
++#define FOR_EACH_ACTIVE_STATE(active) for (active = SSD_INACTIVE; active <= SSD_ACTIVE; active++)
++
+ struct wlr_cursor;
+ 
+ /*
+@@ -35,11 +42,8 @@ enum ssd_part_type {
+ 	LAB_SSD_BUTTON,
+ 
+ 	LAB_SSD_PART_TITLEBAR,
+-	LAB_SSD_PART_TITLEBAR_CORNER_RIGHT,
+-	LAB_SSD_PART_TITLEBAR_CORNER_LEFT,
+ 	LAB_SSD_PART_TITLE,
+ 
+-	/* shared by shadows, borders and extents */
+ 	LAB_SSD_PART_CORNER_TOP_LEFT,
+ 	LAB_SSD_PART_CORNER_TOP_RIGHT,
+ 	LAB_SSD_PART_CORNER_BOTTOM_RIGHT,
+@@ -70,8 +74,8 @@ enum ssd_mode {
+ 
+ /* Forward declare arguments */
+ struct ssd;
+-struct ssd_button;
+ struct ssd_hover_state;
++struct ssd_part;
+ struct view;
+ struct wlr_scene;
+ struct wlr_scene_node;
+@@ -102,12 +106,17 @@ struct ssd_hover_state *ssd_hover_state_new(void);
+ void ssd_update_button_hover(struct wlr_scene_node *node,
+ 	struct ssd_hover_state *hover_state);
+ 
+-enum ssd_part_type ssd_button_get_type(const struct ssd_button *button);
+-struct view *ssd_button_get_view(const struct ssd_button *button);
++enum ssd_part_type ssd_part_get_type(const struct ssd_part *part);
++struct view *ssd_part_get_view(const struct ssd_part *part);
+ 
+ /* Public SSD helpers */
+-enum ssd_part_type ssd_get_part_type(const struct ssd *ssd,
+-	struct wlr_scene_node *node, struct wlr_cursor *cursor);
++
++/*
++ * Returns a part type that represents a mouse context like "Top", "Left" and
++ * "TRCorner" when the cursor is on the window border or resizing handle.
++ */
++enum ssd_part_type ssd_get_resizing_type(const struct ssd *ssd,
++	struct wlr_cursor *cursor);
+ uint32_t ssd_resize_edges(enum ssd_part_type type);
+ bool ssd_part_contains(enum ssd_part_type whole, enum ssd_part_type candidate);
+ enum ssd_mode ssd_mode_parse(const char *mode);
+diff --git a/include/theme.h b/include/theme.h
+index 92d4a99e..68a43f2f 100644
+--- a/include/theme.h
++++ b/include/theme.h
+@@ -192,6 +192,7 @@ struct theme {
+ 	int mag_border_width;
+ };
+ 
++/* TODO: replace with enum ssd_active_state */
+ #define THEME_INACTIVE 0
+ #define THEME_ACTIVE 1
+ 
+diff --git a/src/config/rcxml.c b/src/config/rcxml.c
+index b913f0c4..d40b07d8 100644
+--- a/src/config/rcxml.c
++++ b/src/config/rcxml.c
+@@ -117,7 +117,7 @@ parse_window_type(const char *type)
+  * desk         D           All-desktops toggle (aka omnipresent)
+  */
+ static void
+-fill_section(const char *content, struct wl_list *list, uint32_t *found_buttons)
++fill_section(const char *content, struct wl_list *list)
+ {
+ 	gchar **identifiers = g_strsplit(content, ",", -1);
+ 	for (size_t i = 0; identifiers[i]; ++i) {
+@@ -154,14 +154,6 @@ fill_section(const char *content, struct wl_list *list, uint32_t *found_buttons)
+ 
+ 		assert(type != LAB_SSD_NONE);
+ 
+-		if (*found_buttons & (1 << type)) {
+-			wlr_log(WLR_ERROR, "ignoring duplicated button type '%s'",
+-				identifier);
+-			continue;
+-		}
+-
+-		*found_buttons |= (1 << type);
+-
+ 		struct title_button *item = znew(*item);
+ 		item->type = type;
+ 		wl_list_append(list, &item->link);
+@@ -201,9 +193,8 @@ fill_title_layout(char *content)
+ 		goto err;
+ 	}
+ 
+-	uint32_t found_buttons = 0;
+ 	for (size_t i = 0; parts[i]; ++i) {
+-		fill_section(parts[i], sections[i], &found_buttons);
++		fill_section(parts[i], sections[i]);
+ 	}
+ 
+ 	rc.title_layout_loaded = true;
+diff --git a/src/desktop.c b/src/desktop.c
+index a7cd86a2..9eabab93 100644
+--- a/src/desktop.c
++++ b/src/desktop.c
+@@ -302,22 +302,30 @@ get_cursor_context(struct server *server)
+ 			case LAB_NODE_DESC_VIEW:
+ 			case LAB_NODE_DESC_XDG_POPUP:
+ 				ret.view = desc->data;
+-				ret.type = ssd_get_part_type(
+-					ret.view->ssd, ret.node, cursor);
+-				if (ret.type == LAB_SSD_CLIENT) {
++				if (ret.node->type == WLR_SCENE_NODE_BUFFER
++						&& lab_wlr_surface_from_node(ret.node)) {
++					ret.type = LAB_SSD_CLIENT;
+ 					ret.surface = lab_wlr_surface_from_node(ret.node);
++				} else {
++					/* should never be reached */
++					wlr_log(WLR_ERROR, "cursor not on client or ssd");
+ 				}
+ 				return ret;
+-			case LAB_NODE_DESC_SSD_BUTTON: {
+-				/*
+-				 * Always return the top scene node for SSD
+-				 * buttons
+-				 */
+-				struct ssd_button *button =
+-					node_ssd_button_from_node(node);
++			case LAB_NODE_DESC_SSD_PART: {
++				struct ssd_part *part = node_ssd_part_from_node(node);
+ 				ret.node = node;
+-				ret.type = ssd_button_get_type(button);
+-				ret.view = ssd_button_get_view(button);
++				ret.view = ssd_part_get_view(part);
++
++				/* Detect mouse contexts like Top, Left and TRCorner */
++				ret.type = ssd_get_resizing_type(ret.view->ssd, cursor);
++				if (ret.type == LAB_SSD_NONE) {
++					/*
++					 * Otherwise, detect mouse contexts like
++					 * Title, Titlebar and Iconify
++					 */
++					ret.type = ssd_part_get_type(part);
++				}
++
+ 				return ret;
+ 			}
+ 			case LAB_NODE_DESC_LAYER_SURFACE:
+diff --git a/src/node.c b/src/node.c
+index ae47044c..37c63a7f 100644
+--- a/src/node.c
++++ b/src/node.c
+@@ -71,13 +71,13 @@ node_menuitem_from_node(struct wlr_scene_node *wlr_scene_node)
+ 	return (struct menuitem *)node_descriptor->data;
+ }
+ 
+-struct ssd_button *
+-node_ssd_button_from_node(struct wlr_scene_node *wlr_scene_node)
++struct ssd_part *
++node_ssd_part_from_node(struct wlr_scene_node *wlr_scene_node)
+ {
+ 	assert(wlr_scene_node->data);
+ 	struct node_descriptor *node_descriptor = wlr_scene_node->data;
+-	assert(node_descriptor->type == LAB_NODE_DESC_SSD_BUTTON);
+-	return (struct ssd_button *)node_descriptor->data;
++	assert(node_descriptor->type == LAB_NODE_DESC_SSD_PART);
++	return (struct ssd_part *)node_descriptor->data;
+ }
+ 
+ struct scaled_scene_buffer *
+diff --git a/src/ssd/ssd-border.c b/src/ssd/ssd-border.c
+index 26216ed6..68a02fdd 100644
+--- a/src/ssd/ssd-border.c
++++ b/src/ssd/ssd-border.c
+@@ -8,10 +8,6 @@
+ #include "theme.h"
+ #include "view.h"
+ 
+-#define FOR_EACH_STATE(ssd, tmp) FOR_EACH(tmp, \
+-	&(ssd)->border.active, \
+-	&(ssd)->border.inactive)
+-
+ void
+ ssd_border_create(struct ssd *ssd)
+ {
+@@ -25,35 +21,37 @@ ssd_border_create(struct ssd *ssd)
+ 	int full_width = width + 2 * theme->border_width;
+ 	int corner_width = ssd_get_corner_width();
+ 
+-	float *color;
+-	struct wlr_scene_tree *parent;
+-	struct ssd_sub_tree *subtree;
+-	int active;
+-
+ 	ssd->border.tree = wlr_scene_tree_create(ssd->tree);
+ 	wlr_scene_node_set_position(&ssd->border.tree->node, -theme->border_width, 0);
+ 
+-	FOR_EACH_STATE(ssd, subtree) {
++	enum ssd_active_state active;
++	FOR_EACH_ACTIVE_STATE(active) {
++		struct ssd_border_subtree *subtree = &ssd->border.subtrees[active];
+ 		subtree->tree = wlr_scene_tree_create(ssd->border.tree);
+-		parent = subtree->tree;
+-		active = (subtree == &ssd->border.active) ?
+-			THEME_ACTIVE : THEME_INACTIVE;
++		struct wlr_scene_tree *parent = subtree->tree;
+ 		wlr_scene_node_set_enabled(&parent->node, active);
+-		color = theme->window[active].border_color;
+-
+-		wl_list_init(&subtree->parts);
+-		add_scene_rect(&subtree->parts, LAB_SSD_PART_LEFT, parent,
+-			theme->border_width, height, 0, 0, color);
+-		add_scene_rect(&subtree->parts, LAB_SSD_PART_RIGHT, parent,
+-			theme->border_width, height,
+-			theme->border_width + width, 0, color);
+-		add_scene_rect(&subtree->parts, LAB_SSD_PART_BOTTOM, parent,
+-			full_width, theme->border_width, 0, height, color);
+-		add_scene_rect(&subtree->parts, LAB_SSD_PART_TOP, parent,
+-			MAX(width - 2 * corner_width, 0), theme->border_width,
++		float *color = theme->window[active].border_color;
++
++		subtree->left = wlr_scene_rect_create(parent,
++			theme->border_width, height, color);
++		wlr_scene_node_set_position(&subtree->left->node, 0, 0);
++
++		subtree->right = wlr_scene_rect_create(parent,
++			theme->border_width, height, color);
++		wlr_scene_node_set_position(&subtree->right->node,
++			theme->border_width + width, 0);
++
++		subtree->bottom = wlr_scene_rect_create(parent,
++			full_width, theme->border_width, color);
++		wlr_scene_node_set_position(&subtree->bottom->node,
++			0, height);
++
++		subtree->top = wlr_scene_rect_create(parent,
++			MAX(width - 2 * corner_width, 0), theme->border_width, color);
++		wlr_scene_node_set_position(&subtree->top->node,
+ 			theme->border_width + corner_width,
+-			-(ssd->titlebar.height + theme->border_width), color);
+-	} FOR_EACH_END
++			-(ssd->titlebar.height + theme->border_width));
++	}
+ 
+ 	if (view->maximized == VIEW_AXIS_BOTH) {
+ 		wlr_scene_node_set_enabled(&ssd->border.tree->node, false);
+@@ -129,50 +127,24 @@ ssd_border_update(struct ssd *ssd)
+ 		? 0
+ 		: theme->border_width + corner_width;
+ 
+-	struct ssd_part *part;
+-	struct wlr_scene_rect *rect;
+-	struct ssd_sub_tree *subtree;
+-	FOR_EACH_STATE(ssd, subtree) {
+-		wl_list_for_each(part, &subtree->parts, link) {
+-			rect = wlr_scene_rect_from_node(part->node);
+-			switch (part->type) {
+-			case LAB_SSD_PART_LEFT:
+-				wlr_scene_rect_set_size(rect,
+-					theme->border_width,
+-					side_height);
+-				wlr_scene_node_set_position(part->node,
+-					0,
+-					side_y);
+-				continue;
+-			case LAB_SSD_PART_RIGHT:
+-				wlr_scene_rect_set_size(rect,
+-					theme->border_width,
+-					side_height);
+-				wlr_scene_node_set_position(part->node,
+-					theme->border_width + width,
+-					side_y);
+-				continue;
+-			case LAB_SSD_PART_BOTTOM:
+-				wlr_scene_rect_set_size(rect,
+-					full_width,
+-					theme->border_width);
+-				wlr_scene_node_set_position(part->node,
+-					0,
+-					height);
+-				continue;
+-			case LAB_SSD_PART_TOP:
+-				wlr_scene_rect_set_size(rect,
+-					top_width,
+-					theme->border_width);
+-				wlr_scene_node_set_position(part->node,
+-					top_x,
+-					-(ssd->titlebar.height + theme->border_width));
+-				continue;
+-			default:
+-				continue;
+-			}
+-		}
+-	} FOR_EACH_END
++	enum ssd_active_state active;
++	FOR_EACH_ACTIVE_STATE(active) {
++		struct ssd_border_subtree *subtree = &ssd->border.subtrees[active];
++
++		wlr_scene_rect_set_size(subtree->left, theme->border_width, side_height);
++		wlr_scene_node_set_position(&subtree->left->node, 0, side_y);
++
++		wlr_scene_rect_set_size(subtree->right, theme->border_width, side_height);
++		wlr_scene_node_set_position(&subtree->right->node,
++			theme->border_width + width, side_y);
++
++		wlr_scene_rect_set_size(subtree->bottom, full_width, theme->border_width);
++		wlr_scene_node_set_position(&subtree->bottom->node, 0, height);
++
++		wlr_scene_rect_set_size(subtree->top, top_width, theme->border_width);
++		wlr_scene_node_set_position(&subtree->top->node,
++			top_x, -(ssd->titlebar.height + theme->border_width));
++	}
+ }
+ 
+ void
+@@ -181,15 +153,6 @@ ssd_border_destroy(struct ssd *ssd)
+ 	assert(ssd);
+ 	assert(ssd->border.tree);
+ 
+-	struct ssd_sub_tree *subtree;
+-	FOR_EACH_STATE(ssd, subtree) {
+-		ssd_destroy_parts(&subtree->parts);
+-		wlr_scene_node_destroy(&subtree->tree->node);
+-		subtree->tree = NULL;
+-	} FOR_EACH_END
+-
+ 	wlr_scene_node_destroy(&ssd->border.tree->node);
+-	ssd->border.tree = NULL;
++	ssd->border = (struct ssd_border_scene){0};
+ }
+-
+-#undef FOR_EACH_STATE
+diff --git a/src/ssd/ssd-extents.c b/src/ssd/ssd-extents.c
+index f8fdd9f0..849e1dd0 100644
+--- a/src/ssd/ssd-extents.c
++++ b/src/ssd/ssd-extents.c
+@@ -11,22 +11,11 @@
+ #include "theme.h"
+ #include "view.h"
+ 
+-static struct ssd_part *
+-add_extent(struct wl_list *part_list, enum ssd_part_type type,
+-		struct wlr_scene_tree *parent)
+-{
+-	float invisible[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+-	struct ssd_part *part = add_scene_part(part_list, type);
+-	part->node = &wlr_scene_rect_create(parent, 0, 0, invisible)->node;
+-	return part;
+-}
+-
+ void
+ ssd_extents_create(struct ssd *ssd)
+ {
+ 	struct view *view = ssd->view;
+ 	struct theme *theme = view->server->theme;
+-	struct wl_list *part_list = &ssd->extents.parts;
+ 
+ 	int border_width = MAX(0, MAX(rc.resize_minimum_area, theme->border_width));
+ 
+@@ -35,19 +24,68 @@ ssd_extents_create(struct ssd *ssd)
+ 	if (view->fullscreen || view->maximized == VIEW_AXIS_BOTH) {
+ 		wlr_scene_node_set_enabled(&parent->node, false);
+ 	}
+-	wl_list_init(&ssd->extents.parts);
+ 	wlr_scene_node_set_position(&parent->node,
+ 		-border_width, -(ssd->titlebar.height + border_width));
+ 
+-	add_extent(part_list, LAB_SSD_PART_TOP, parent);
+-	add_extent(part_list, LAB_SSD_PART_LEFT, parent);
+-	add_extent(part_list, LAB_SSD_PART_RIGHT, parent);
+-	add_extent(part_list, LAB_SSD_PART_BOTTOM, parent);
++	float invisible[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
++	ssd->extents.top = wlr_scene_rect_create(parent, 0, 0, invisible);
++	ssd->extents.left = wlr_scene_rect_create(parent, 0, 0, invisible);
++	ssd->extents.right = wlr_scene_rect_create(parent, 0, 0, invisible);
++	ssd->extents.bottom = wlr_scene_rect_create(parent, 0, 0, invisible);
+ 
+ 	/* Initial manual update to keep X11 applications happy */
+ 	ssd_extents_update(ssd);
+ }
+ 
++static void
++resize_extent_within_usable(struct wlr_scene_rect *rect,
++		pixman_region32_t *usable, int x, int y, int w, int h)
++{
++	pixman_region32_t intersection;
++	pixman_region32_init(&intersection);
++	pixman_region32_clear(&intersection);
++	/* Constrain part to output->usable_area */
++	pixman_region32_intersect_rect(&intersection, usable, x, y, w, h);
++	int nrects;
++	const pixman_box32_t *inter_rects =
++		pixman_region32_rectangles(&intersection, &nrects);
++
++	if (nrects == 0) {
++		/* Not visible */
++		wlr_scene_node_set_enabled(&rect->node, false);
++		goto out;
++	}
++
++	/*
++	 * For each edge, the invisible grab area is resized
++	 * to not cover layer-shell clients such as panels.
++	 * However, only one resize operation is used per edge,
++	 * so if a window is in the unlikely position that it
++	 * is near a panel but also overspills onto another screen,
++	 * the invisible grab-area on the other screen would be
++	 * smaller than would normally be the case.
++	 *
++	 * Thus only use the first intersecting rect, this is
++	 * a compromise as it doesn't require us to create
++	 * multiple scene rects for a given extent edge
++	 * and still works in 95% of the cases.
++	 */
++	struct wlr_box result_box = (struct wlr_box) {
++		.x = inter_rects[0].x1,
++		.y = inter_rects[0].y1,
++		.width = inter_rects[0].x2 - inter_rects[0].x1,
++		.height = inter_rects[0].y2 - inter_rects[0].y1
++	};
++
++	wlr_scene_node_set_enabled(&rect->node, true);
++
++	wlr_scene_node_set_position(&rect->node, result_box.x, result_box.y);
++	wlr_scene_rect_set_size(rect, result_box.width, result_box.height);
++
++out:
++	pixman_region32_fini(&intersection);
++}
++
+ void
+ ssd_extents_update(struct ssd *ssd)
+ {
+@@ -73,12 +111,6 @@ ssd_extents_update(struct ssd *ssd)
+ 	int border_width = MAX(rc.resize_minimum_area, theme->border_width);
+ 	int extended_area = MAX(0, rc.resize_minimum_area - theme->border_width);
+ 
+-	struct wlr_box part_box;
+-	struct wlr_box result_box;
+-	struct ssd_part *part;
+-	struct wlr_scene_rect *rect;
+-	struct wlr_box target;
+-
+ 	/* Make sure we update the y offset based on titlebar shown / hidden */
+ 	wlr_scene_node_set_position(&ssd->extents.tree->node,
+ 		-border_width, -(ssd->titlebar.height + border_width));
+@@ -87,11 +119,8 @@ ssd_extents_update(struct ssd *ssd)
+ 	 * Convert all output usable areas that the
+ 	 * view is currently on into a pixman region
+ 	 */
+-	int nrects;
+ 	pixman_region32_t usable;
+-	pixman_region32_t intersection;
+ 	pixman_region32_init(&usable);
+-	pixman_region32_init(&intersection);
+ 	struct output *output;
+ 	wl_list_for_each(output, &view->server->outputs, link) {
+ 		if (!view_on_output(view, output)) {
+@@ -103,103 +132,24 @@ ssd_extents_update(struct ssd *ssd)
+ 			usable_area.y, usable_area.width, usable_area.height);
+ 	}
+ 
+-	/* Remember base layout coordinates */
++	/* Move usable area to the coordinate system of extents */
+ 	int base_x, base_y;
+ 	wlr_scene_node_coords(&ssd->extents.tree->node, &base_x, &base_y);
++	pixman_region32_translate(&usable, -base_x, -base_y);
++
++	resize_extent_within_usable(ssd->extents.top, &usable,
++		0, 0,
++		full_width + extended_area * 2, extended_area);
++	resize_extent_within_usable(ssd->extents.left, &usable,
++		0, extended_area,
++		extended_area, full_height);
++	resize_extent_within_usable(ssd->extents.right, &usable,
++		extended_area + full_width, extended_area,
++		extended_area, full_height);
++	resize_extent_within_usable(ssd->extents.bottom, &usable,
++		0, extended_area + full_height,
++		full_width + extended_area * 2, extended_area);
+ 
+-	wl_list_for_each(part, &ssd->extents.parts, link) {
+-		rect = wlr_scene_rect_from_node(part->node);
+-		switch (part->type) {
+-		case LAB_SSD_PART_TOP:
+-			target.x = 0;
+-			target.y = 0;
+-			target.width = full_width + extended_area * 2;
+-			target.height = extended_area;
+-			break;
+-		case LAB_SSD_PART_LEFT:
+-			target.x = 0;
+-			target.y = extended_area;
+-			target.width = extended_area;
+-			target.height = full_height;
+-			break;
+-		case LAB_SSD_PART_RIGHT:
+-			target.x = extended_area + full_width;
+-			target.y = extended_area;
+-			target.width = extended_area;
+-			target.height = full_height;
+-			break;
+-		case LAB_SSD_PART_BOTTOM:
+-			target.x = 0;
+-			target.y = extended_area + full_height;
+-			target.width = full_width + extended_area * 2;
+-			target.height = extended_area;
+-			break;
+-		default:
+-			/* not reached */
+-			assert(false);
+-			/* suppress warnings with NDEBUG */
+-			target = (struct wlr_box){0};
+-		}
+-
+-		/* Get layout geometry of what the part *should* be */
+-		part_box.x = base_x + target.x;
+-		part_box.y = base_y + target.y;
+-		part_box.width = target.width;
+-		part_box.height = target.height;
+-
+-		/* Constrain part to output->usable_area */
+-		pixman_region32_clear(&intersection);
+-		pixman_region32_intersect_rect(&intersection, &usable,
+-			part_box.x, part_box.y, part_box.width, part_box.height);
+-		const pixman_box32_t *inter_rects =
+-			pixman_region32_rectangles(&intersection, &nrects);
+-
+-		if (nrects == 0) {
+-			/* Not visible */
+-			wlr_scene_node_set_enabled(part->node, false);
+-			continue;
+-		}
+-
+-		/*
+-		 * For each edge, the invisible grab area is resized
+-		 * to not cover layer-shell clients such as panels.
+-		 * However, only one resize operation is used per edge,
+-		 * so if a window is in the unlikely position that it
+-		 * is near a panel but also overspills onto another screen,
+-		 * the invisible grab-area on the other screen would be
+-		 * smaller than would normally be the case.
+-		 *
+-		 * Thus only use the first intersecting rect, this is
+-		 * a compromise as it doesn't require us to create
+-		 * multiple scene rects for a given extent edge
+-		 * and still works in 95% of the cases.
+-		 */
+-		result_box = (struct wlr_box) {
+-			.x = inter_rects[0].x1,
+-			.y = inter_rects[0].y1,
+-			.width = inter_rects[0].x2 - inter_rects[0].x1,
+-			.height = inter_rects[0].y2 - inter_rects[0].y1
+-		};
+-
+-		if (!part->node->enabled) {
+-			wlr_scene_node_set_enabled(part->node, true);
+-		}
+-
+-		if (part_box.width != result_box.width
+-				|| part_box.height != result_box.height) {
+-			/* Partly visible */
+-			wlr_scene_rect_set_size(rect, result_box.width,
+-				result_box.height);
+-			wlr_scene_node_set_position(part->node,
+-				target.x + (result_box.x - part_box.x),
+-				target.y + (result_box.y - part_box.y));
+-		} else {
+-			/* Fully visible */
+-			wlr_scene_node_set_position(part->node, target.x, target.y);
+-			wlr_scene_rect_set_size(rect, target.width, target.height);
+-		}
+-	}
+-	pixman_region32_fini(&intersection);
+ 	pixman_region32_fini(&usable);
+ }
+ 
+@@ -210,7 +160,6 @@ ssd_extents_destroy(struct ssd *ssd)
+ 		return;
+ 	}
+ 
+-	ssd_destroy_parts(&ssd->extents.parts);
+ 	wlr_scene_node_destroy(&ssd->extents.tree->node);
+-	ssd->extents.tree = NULL;
++	ssd->extents = (struct ssd_extents_scene){0};
+ }
+diff --git a/src/ssd/ssd-part.c b/src/ssd/ssd-part.c
+index 1efc7cad..4e88ae55 100644
+--- a/src/ssd/ssd-part.c
++++ b/src/ssd/ssd-part.c
+@@ -1,99 +1,60 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ 
+ #include <assert.h>
+-#include "buffer.h"
+-#include "common/box.h"
+ #include "common/list.h"
+ #include "common/mem.h"
+ #include "common/scaled-icon-buffer.h"
+ #include "common/scaled-img-buffer.h"
+-#include "labwc.h"
+ #include "node.h"
+ #include "ssd-internal.h"
+ 
+ /* Internal helpers */
+ static void
+-handle_button_node_destroy(struct wl_listener *listener, void *data)
++handle_node_destroy(struct wl_listener *listener, void *data)
+ {
+-	struct ssd_button *button = wl_container_of(listener, button, destroy);
+-	wl_list_remove(&button->destroy.link);
+-	free(button);
+-}
+-
+-/*
+- * Create a new node_descriptor containing a link to a new ssd_button struct.
+- * Both will be destroyed automatically once the scene_node they are attached
+- * to is destroyed.
+- */
+-static struct ssd_button *
+-ssd_button_descriptor_create(struct wlr_scene_node *node)
+-{
+-	/* Create new ssd_button */
+-	struct ssd_button *button = znew(*button);
+-
+-	/* Let it destroy automatically when the scene node destroys */
+-	button->destroy.notify = handle_button_node_destroy;
+-	wl_signal_add(&node->events.destroy, &button->destroy);
+-
+-	/* And finally attach the ssd_button to a node descriptor */
+-	node_descriptor_create(node, LAB_NODE_DESC_SSD_BUTTON, button);
+-	return button;
++	struct ssd_part *part = wl_container_of(listener, part, node_destroy);
++	wl_list_remove(&part->node_destroy.link);
++	wl_list_remove(&part->link);
++	free(part->button);
++	free(part);
+ }
+ 
+ /* Internal API */
+ struct ssd_part *
+-add_scene_part(struct wl_list *part_list, enum ssd_part_type type)
++add_scene_part(enum ssd_part_type type, struct view *view,
++		struct wlr_scene_node *node)
+ {
+ 	struct ssd_part *part = znew(*part);
+ 	part->type = type;
+-	wl_list_append(part_list, &part->link);
+-	return part;
+-}
++	part->node = node;
++	part->view = view;
++	wl_list_init(&part->link);
+ 
+-struct ssd_part *
+-add_scene_rect(struct wl_list *list, enum ssd_part_type type,
+-	struct wlr_scene_tree *parent, int width, int height,
+-	int x, int y, float color[4])
+-{
+-	assert(width >= 0 && height >= 0);
+-	struct ssd_part *part = add_scene_part(list, type);
+-	part->node = &wlr_scene_rect_create(
+-		parent, width, height, color)->node;
+-	wlr_scene_node_set_position(part->node, x, y);
+-	return part;
+-}
++	node_descriptor_create(node, LAB_NODE_DESC_SSD_PART, part);
++	part->node_destroy.notify = handle_node_destroy;
++	wl_signal_add(&node->events.destroy, &part->node_destroy);
+ 
+-struct ssd_part *
+-add_scene_buffer(struct wl_list *list, enum ssd_part_type type,
+-	struct wlr_scene_tree *parent, struct wlr_buffer *buffer,
+-	int x, int y)
+-{
+-	struct ssd_part *part = add_scene_part(list, type);
+-	part->node = &wlr_scene_buffer_create(parent, buffer)->node;
+-	wlr_scene_node_set_position(part->node, x, y);
+ 	return part;
+ }
+ 
+ struct ssd_part *
+-add_scene_button(struct wl_list *part_list, enum ssd_part_type type,
++add_scene_button(struct wl_list *button_parts, enum ssd_part_type type,
+ 		struct wlr_scene_tree *parent,
+ 		struct lab_img *imgs[LAB_BS_ALL + 1],
+ 		int x, int y, struct view *view)
+ {
+-	struct ssd_part *button_root = add_scene_part(part_list, type);
+-	parent = wlr_scene_tree_create(parent);
+-	button_root->node = &parent->node;
+-	wlr_scene_node_set_position(button_root->node, x, y);
++	struct wlr_scene_tree *root = wlr_scene_tree_create(parent);
++	wlr_scene_node_set_position(&root->node, x, y);
+ 
+-	struct ssd_button *button = ssd_button_descriptor_create(button_root->node);
+-	button->type = type;
+-	button->view = view;
++	struct ssd_button *button = znew(*button);
++	struct ssd_part *part = add_scene_part(type, view, &root->node);
++	part->button = button;
++	wl_list_append(button_parts, &part->link);
+ 
+ 	/* Hitbox */
+ 	float invisible[4] = { 0, 0, 0, 0 };
+-	add_scene_rect(part_list, type, parent,
+-		rc.theme->window_button_width, rc.theme->window_button_height, 0, 0,
+-		invisible);
++	wlr_scene_rect_create(root, rc.theme->window_button_width,
++		rc.theme->window_button_height, invisible);
+ 
+ 	/* Icons */
+ 	int button_width = rc.theme->window_button_width;
+@@ -109,14 +70,13 @@ add_scene_button(struct wl_list *part_list, enum ssd_part_type type,
+ 	int icon_padding = button_width / 10;
+ 
+ 	if (type == LAB_SSD_BUTTON_WINDOW_ICON) {
+-		struct ssd_part *icon_part = add_scene_part(part_list, type);
+ 		struct scaled_icon_buffer *icon_buffer =
+-			scaled_icon_buffer_create(parent, view->server,
++			scaled_icon_buffer_create(root, view->server,
+ 				button_width - 2 * icon_padding, button_height);
+-		scaled_icon_buffer_set_view(icon_buffer, view);
+ 		assert(icon_buffer);
+-		icon_part->node = &icon_buffer->scene_buffer->node;
+-		wlr_scene_node_set_position(icon_part->node, icon_padding, 0);
++		struct wlr_scene_node *icon_node = &icon_buffer->scene_buffer->node;
++		scaled_icon_buffer_set_view(icon_buffer, view);
++		wlr_scene_node_set_position(icon_node, icon_padding, 0);
+ 		button->window_icon = icon_buffer;
+ 	} else {
+ 		for (uint8_t state_set = LAB_BS_DEFAULT;
+@@ -124,13 +84,12 @@ add_scene_button(struct wl_list *part_list, enum ssd_part_type type,
+ 			if (!imgs[state_set]) {
+ 				continue;
+ 			}
+-			struct ssd_part *icon_part = add_scene_part(part_list, type);
+ 			struct scaled_img_buffer *img_buffer = scaled_img_buffer_create(
+-				parent, imgs[state_set], rc.theme->window_button_width,
++				root, imgs[state_set], rc.theme->window_button_width,
+ 				rc.theme->window_button_height);
+ 			assert(img_buffer);
+-			icon_part->node = &img_buffer->scene_buffer->node;
+-			wlr_scene_node_set_enabled(icon_part->node, false);
++			struct wlr_scene_node *icon_node = &img_buffer->scene_buffer->node;
++			wlr_scene_node_set_enabled(icon_node, false);
+ 			button->img_buffers[state_set] = img_buffer;
+ 		}
+ 		/* Initially show non-hover, non-toggled, unrounded variant */
+@@ -138,34 +97,5 @@ add_scene_button(struct wl_list *part_list, enum ssd_part_type type,
+ 			&button->img_buffers[LAB_BS_DEFAULT]->scene_buffer->node, true);
+ 	}
+ 
+-	return button_root;
+-}
+-
+-struct ssd_part *
+-ssd_get_part(struct wl_list *part_list, enum ssd_part_type type)
+-{
+-	struct ssd_part *part;
+-	wl_list_for_each(part, part_list, link) {
+-		if (part->type == type) {
+-			return part;
+-		}
+-	}
+-	return NULL;
+-}
+-
+-void
+-ssd_destroy_parts(struct wl_list *list)
+-{
+-	struct ssd_part *part, *tmp;
+-	wl_list_for_each_reverse_safe(part, tmp, list, link) {
+-		if (part->node) {
+-			wlr_scene_node_destroy(part->node);
+-			part->node = NULL;
+-		}
+-		/* part->buffer will free itself along the scene_buffer node */
+-		part->buffer = NULL;
+-		wl_list_remove(&part->link);
+-		free(part);
+-	}
+-	assert(wl_list_empty(list));
++	return part;
+ }
+diff --git a/src/ssd/ssd-shadow.c b/src/ssd/ssd-shadow.c
+index 8c1f8839..5a23d73b 100644
+--- a/src/ssd/ssd-shadow.c
++++ b/src/ssd/ssd-shadow.c
+@@ -9,10 +9,6 @@
+ #include "view.h"
+ #include <cairo.h>
+ 
+-#define FOR_EACH_STATE(ssd, tmp) FOR_EACH(tmp, \
+-	&(ssd)->shadow.active, \
+-	&(ssd)->shadow.inactive)
+-
+ /*
+  * Implements point_accepts_input for a buffer which never accepts input
+  * because drop-shadows should never catch clicks!
+@@ -49,12 +45,10 @@ corner_scale_crop(struct wlr_scene_buffer *buffer, int horizontal_overlap,
+  * drop-shadow.
+  */
+ static void
+-set_shadow_part_geometry(struct ssd_part *part, int width, int height,
+-		int titlebar_height, int corner_size, int inset,
+-		int visible_shadow_width)
++set_shadow_parts_geometry(struct ssd_shadow_subtree *subtree,
++		int width, int height, int titlebar_height, int corner_size,
++		int inset, int visible_shadow_width)
+ {
+-	struct wlr_scene_buffer *scene_buf =
+-		wlr_scene_buffer_from_node(part->node);
+ 	/*
+ 	 * If the shadow inset is greater than half the overall window height
+ 	 * or width (eg. because the window is shaded or because we have a
+@@ -80,83 +74,69 @@ set_shadow_part_geometry(struct ssd_part *part, int width, int height,
+ 	 * the top-left and bottom-right corners one pixel wider (if the width
+ 	 * is odd) or taller (if the height is odd).
+ 	 */
+-	if (part->type == LAB_SSD_PART_CORNER_TOP_LEFT
+-			|| part->type == LAB_SSD_PART_CORNER_BOTTOM_RIGHT) {
+-		if (horizontal_overlap > 0) {
+-			horizontal_overlap -= width % 2;
+-		}
+-		if (vertical_overlap > 0) {
+-			vertical_overlap -= height % 2;
+-		}
++	int horizontal_overlap_downsized = horizontal_overlap;
++	if (horizontal_overlap > 0) {
++		horizontal_overlap_downsized -= width % 2;
++	}
++	int vertical_overlap_downsized = vertical_overlap;
++	if (vertical_overlap > 0) {
++		vertical_overlap_downsized -= height % 2;
+ 	}
+ 
+ 	int x;
+ 	int y;
+ 
+-	switch (part->type) {
+-	case LAB_SSD_PART_CORNER_BOTTOM_RIGHT:
+-		x = width - inset + horizontal_overlap;
+-		y = -titlebar_height + height - inset + vertical_overlap;
+-		wlr_scene_node_set_position(part->node, x, y);
+-		corner_scale_crop(scene_buf, horizontal_overlap,
+-			vertical_overlap, corner_size);
+-		break;
+-	case LAB_SSD_PART_CORNER_BOTTOM_LEFT:
+-		x = -visible_shadow_width;
+-		y = -titlebar_height + height - inset + vertical_overlap;
+-		wlr_scene_node_set_position(part->node, x, y);
+-		corner_scale_crop(scene_buf, horizontal_overlap,
+-			vertical_overlap, corner_size);
+-		break;
+-	case LAB_SSD_PART_CORNER_TOP_LEFT:
+-		x = -visible_shadow_width;
+-		y = -titlebar_height - visible_shadow_width;
+-		wlr_scene_node_set_position(part->node, x, y);
+-		corner_scale_crop(scene_buf, horizontal_overlap,
+-			vertical_overlap, corner_size);
+-		break;
+-	case LAB_SSD_PART_CORNER_TOP_RIGHT:
+-		x = width - inset + horizontal_overlap;
+-		y = -titlebar_height - visible_shadow_width;
+-		wlr_scene_node_set_position(part->node, x, y);
+-		corner_scale_crop(scene_buf, horizontal_overlap,
+-			vertical_overlap, corner_size);
+-		break;
+-	case LAB_SSD_PART_RIGHT:
+-		x = width;
+-		y = -titlebar_height + inset;
+-		wlr_scene_node_set_position(part->node, x, y);
+-		wlr_scene_buffer_set_dest_size(
+-			scene_buf, visible_shadow_width, MAX(height - 2 * inset, 0));
+-		wlr_scene_node_set_enabled(part->node, show_sides);
+-		break;
+-	case LAB_SSD_PART_BOTTOM:
+-		x = inset;
+-		y = -titlebar_height + height;
+-		wlr_scene_node_set_position(part->node, x, y);
+-		wlr_scene_buffer_set_dest_size(
+-			scene_buf, MAX(width - 2 * inset, 0), visible_shadow_width);
+-		wlr_scene_node_set_enabled(part->node, show_topbottom);
+-		break;
+-	case LAB_SSD_PART_LEFT:
+-		x = -visible_shadow_width;
+-		y = -titlebar_height + inset;
+-		wlr_scene_node_set_position(part->node, x, y);
+-		wlr_scene_buffer_set_dest_size(
+-			scene_buf, visible_shadow_width, MAX(height - 2 * inset, 0));
+-		wlr_scene_node_set_enabled(part->node, show_sides);
+-		break;
+-	case LAB_SSD_PART_TOP:
+-		x = inset;
+-		y = -titlebar_height - visible_shadow_width;
+-		wlr_scene_node_set_position(part->node, x, y);
+-		wlr_scene_buffer_set_dest_size(
+-			scene_buf, MAX(width - 2 * inset, 0), visible_shadow_width);
+-		wlr_scene_node_set_enabled(part->node, show_topbottom);
+-		break;
+-	default:
+-		break;
+-	}
++	x = width - inset + horizontal_overlap_downsized;
++	y = -titlebar_height + height - inset + vertical_overlap_downsized;
++	wlr_scene_node_set_position(&subtree->bottom_right->node, x, y);
++	corner_scale_crop(subtree->bottom_right, horizontal_overlap_downsized,
++		vertical_overlap_downsized, corner_size);
++
++	x = -visible_shadow_width;
++	y = -titlebar_height + height - inset + vertical_overlap;
++	wlr_scene_node_set_position(&subtree->bottom_left->node, x, y);
++	corner_scale_crop(subtree->bottom_left, horizontal_overlap,
++		vertical_overlap, corner_size);
++
++	x = -visible_shadow_width;
++	y = -titlebar_height - visible_shadow_width;
++	wlr_scene_node_set_position(&subtree->top_left->node, x, y);
++	corner_scale_crop(subtree->top_left, horizontal_overlap_downsized,
++		vertical_overlap_downsized, corner_size);
++
++	x = width - inset + horizontal_overlap;
++	y = -titlebar_height - visible_shadow_width;
++	wlr_scene_node_set_position(&subtree->top_right->node, x, y);
++	corner_scale_crop(subtree->top_right, horizontal_overlap,
++		vertical_overlap, corner_size);
++
++	x = width;
++	y = -titlebar_height + inset;
++	wlr_scene_node_set_position(&subtree->right->node, x, y);
++	wlr_scene_buffer_set_dest_size(subtree->right,
++		visible_shadow_width, MAX(height - 2 * inset, 0));
++	wlr_scene_node_set_enabled(&subtree->right->node, show_sides);
++
++	x = inset;
++	y = -titlebar_height + height;
++	wlr_scene_node_set_position(&subtree->bottom->node, x, y);
++	wlr_scene_buffer_set_dest_size(subtree->bottom,
++		MAX(width - 2 * inset, 0), visible_shadow_width);
++	wlr_scene_node_set_enabled(&subtree->bottom->node, show_topbottom);
++
++	x = -visible_shadow_width;
++	y = -titlebar_height + inset;
++	wlr_scene_node_set_position(&subtree->left->node, x, y);
++	wlr_scene_buffer_set_dest_size(subtree->left,
++		visible_shadow_width, MAX(height - 2 * inset, 0));
++	wlr_scene_node_set_enabled(&subtree->left->node, show_sides);
++
++	x = inset;
++	y = -titlebar_height - visible_shadow_width;
++	wlr_scene_node_set_position(&subtree->top->node, x, y);
++	wlr_scene_buffer_set_dest_size(subtree->top,
++		MAX(width - 2 * inset, 0), visible_shadow_width);
++	wlr_scene_node_set_enabled(&subtree->top->node, show_topbottom);
+ }
+ 
+ static void
+@@ -168,17 +148,14 @@ set_shadow_geometry(struct ssd *ssd)
+ 	int width = view->current.width;
+ 	int height = view_effective_height(view, false) + titlebar_height;
+ 
+-	struct ssd_part *part;
+-	struct ssd_sub_tree *subtree;
+-
+-	FOR_EACH_STATE(ssd, subtree) {
++	enum ssd_active_state active;
++	FOR_EACH_ACTIVE_STATE(active) {
++		struct ssd_shadow_subtree *subtree = &ssd->shadow.subtrees[active];
+ 		if (!subtree->tree) {
+ 			/* Looks like this type of shadow is disabled */
+ 			continue;
+ 		}
+ 
+-		int active = (subtree == &ssd->shadow.active) ?
+-			THEME_ACTIVE : THEME_INACTIVE;
+ 		int visible_shadow_width = theme->window[active].shadow_size;
+ 		/* inset as a proportion of shadow width */
+ 		double inset_proportion = SSD_SHADOW_INSET;
+@@ -193,23 +170,19 @@ set_shadow_geometry(struct ssd *ssd)
+ 		int corner_size =
+ 			theme->window[active].shadow_corner_top->logical_height;
+ 
+-		wl_list_for_each(part, &subtree->parts, link) {
+-			set_shadow_part_geometry(part, width, height,
+-				titlebar_height, corner_size, inset,
+-				visible_shadow_width);
+-		}
+-	} FOR_EACH_END
++		set_shadow_parts_geometry(subtree, width, height,
++			titlebar_height, corner_size, inset,
++			visible_shadow_width);
++	}
+ }
+ 
+-static void
+-make_shadow(struct wl_list *parts, enum ssd_part_type type,
++static struct wlr_scene_buffer *
++make_shadow(struct view *view,
+ 	struct wlr_scene_tree *parent, struct wlr_buffer *buf,
+ 	enum wl_output_transform tx)
+ {
+-	struct ssd_part *part = add_scene_buffer(
+-		parts, type, parent, buf, 0, 0);
+ 	struct wlr_scene_buffer *scene_buf =
+-		wlr_scene_buffer_from_node(part->node);
++		wlr_scene_buffer_create(parent, buf);
+ 	wlr_scene_buffer_set_transform(scene_buf, tx);
+ 	scene_buf->point_accepts_input = never_accepts_input;
+ 	/*
+@@ -217,6 +190,7 @@ make_shadow(struct wl_list *parts, enum ssd_part_type type,
+ 	 * pixel wide/tall. Use nearest-neighbour scaling to workaround.
+ 	 */
+ 	scene_buf->filter_mode = WLR_SCALE_FILTER_NEAREST;
++	return scene_buf;
+ }
+ 
+ void
+@@ -228,51 +202,47 @@ ssd_shadow_create(struct ssd *ssd)
+ 	ssd->shadow.tree = wlr_scene_tree_create(ssd->tree);
+ 
+ 	struct theme *theme = ssd->view->server->theme;
+-	struct wlr_buffer *corner_top_buffer;
+-	struct wlr_buffer *corner_bottom_buffer;
+-	struct wlr_buffer *edge_buffer;
+-	struct ssd_sub_tree *subtree;
+-	struct wlr_scene_tree *parent;
+-	int active;
++	struct view *view = ssd->view;
+ 
+-	FOR_EACH_STATE(ssd, subtree) {
+-		wl_list_init(&subtree->parts);
++	enum ssd_active_state active;
++	FOR_EACH_ACTIVE_STATE(active) {
++		struct ssd_shadow_subtree *subtree = &ssd->shadow.subtrees[active];
+ 
+ 		if (!rc.shadows_enabled) {
+ 			/* Shadows are globally disabled */
+ 			continue;
+ 		}
+-		active = (subtree == &ssd->shadow.active) ?
+-			THEME_ACTIVE : THEME_INACTIVE;
+ 		if (theme->window[active].shadow_size == 0) {
+ 			/* Window shadows are disabled */
+ 			continue;
+ 		}
+ 
+ 		subtree->tree = wlr_scene_tree_create(ssd->shadow.tree);
+-		parent = subtree->tree;
+-		corner_top_buffer = &theme->window[active].shadow_corner_top->base;
+-		corner_bottom_buffer = &theme->window[active].shadow_corner_bottom->base;
+-		edge_buffer = &theme->window[active].shadow_edge->base;
+-
+-		make_shadow(&subtree->parts, LAB_SSD_PART_CORNER_BOTTOM_RIGHT,
+-			parent, corner_bottom_buffer, WL_OUTPUT_TRANSFORM_NORMAL);
+-		make_shadow(&subtree->parts, LAB_SSD_PART_CORNER_BOTTOM_LEFT,
+-			parent, corner_bottom_buffer, WL_OUTPUT_TRANSFORM_FLIPPED);
+-		make_shadow(&subtree->parts, LAB_SSD_PART_CORNER_TOP_LEFT,
+-			parent, corner_top_buffer, WL_OUTPUT_TRANSFORM_180);
+-		make_shadow(&subtree->parts, LAB_SSD_PART_CORNER_TOP_RIGHT,
+-			parent, corner_top_buffer, WL_OUTPUT_TRANSFORM_FLIPPED_180);
+-		make_shadow(&subtree->parts, LAB_SSD_PART_RIGHT, parent,
++		struct wlr_scene_tree *parent = subtree->tree;
++		struct wlr_buffer *corner_top_buffer =
++			&theme->window[active].shadow_corner_top->base;
++		struct wlr_buffer *corner_bottom_buffer =
++			&theme->window[active].shadow_corner_bottom->base;
++		struct wlr_buffer *edge_buffer =
++			&theme->window[active].shadow_edge->base;
++
++		subtree->bottom_right = make_shadow(view, parent,
++			corner_bottom_buffer, WL_OUTPUT_TRANSFORM_NORMAL);
++		subtree->bottom_left = make_shadow(view, parent,
++			corner_bottom_buffer, WL_OUTPUT_TRANSFORM_FLIPPED);
++		subtree->top_left = make_shadow(view, parent,
++			corner_top_buffer, WL_OUTPUT_TRANSFORM_180);
++		subtree->top_right = make_shadow(view, parent,
++			corner_top_buffer, WL_OUTPUT_TRANSFORM_FLIPPED_180);
++		subtree->right = make_shadow(view, parent,
+ 			edge_buffer, WL_OUTPUT_TRANSFORM_NORMAL);
+-		make_shadow(&subtree->parts, LAB_SSD_PART_BOTTOM, parent,
++		subtree->bottom = make_shadow(view, parent,
+ 			edge_buffer, WL_OUTPUT_TRANSFORM_90);
+-		make_shadow(&subtree->parts, LAB_SSD_PART_LEFT, parent,
++		subtree->left = make_shadow(view, parent,
+ 			edge_buffer, WL_OUTPUT_TRANSFORM_180);
+-		make_shadow(&subtree->parts, LAB_SSD_PART_TOP, parent,
++		subtree->top = make_shadow(view, parent,
+ 			edge_buffer, WL_OUTPUT_TRANSFORM_270);
+-
+-	} FOR_EACH_END
++	}
+ 
+ 	ssd_shadow_update(ssd);
+ }
+@@ -309,16 +279,6 @@ ssd_shadow_destroy(struct ssd *ssd)
+ 	assert(ssd);
+ 	assert(ssd->shadow.tree);
+ 
+-	struct ssd_sub_tree *subtree;
+-	FOR_EACH_STATE(ssd, subtree) {
+-		ssd_destroy_parts(&subtree->parts);
+-		/*
+-		 * subtree->tree will be destroyed when its
+-		 * parent (ssd->shadow.tree) is destroyed.
+-		 */
+-		subtree->tree = NULL;
+-	} FOR_EACH_END
+-
+ 	wlr_scene_node_destroy(&ssd->shadow.tree->node);
+-	ssd->shadow.tree = NULL;
++	ssd->shadow = (struct ssd_shadow_scene){0};
+ }
+diff --git a/src/ssd/ssd-titlebar.c b/src/ssd/ssd-titlebar.c
+index 57d49600..65a9f6c0 100644
+--- a/src/ssd/ssd-titlebar.c
++++ b/src/ssd/ssd-titlebar.c
+@@ -5,7 +5,6 @@
+ #include <string.h>
+ #include <wlr/render/pixman.h>
+ #include "buffer.h"
+-#include "config.h"
+ #include "common/mem.h"
+ #include "common/scaled-font-buffer.h"
+ #include "common/scaled-icon-buffer.h"
+@@ -20,10 +19,6 @@
+ #include "theme.h"
+ #include "view.h"
+ 
+-#define FOR_EACH_STATE(ssd, tmp) FOR_EACH(tmp, \
+-	&(ssd)->titlebar.active, \
+-	&(ssd)->titlebar.inactive)
+-
+ static void set_squared_corners(struct ssd *ssd, bool enable);
+ static void set_alt_button_icon(struct ssd *ssd, enum ssd_part_type type, bool enable);
+ static void update_visible_buttons(struct ssd *ssd);
+@@ -36,30 +31,26 @@ ssd_titlebar_create(struct ssd *ssd)
+ 	int width = view->current.width;
+ 	int corner_width = ssd_get_corner_width();
+ 
+-	struct wlr_scene_tree *parent;
+-	struct wlr_buffer *titlebar_fill;
+-	struct wlr_buffer *corner_top_left;
+-	struct wlr_buffer *corner_top_right;
+-	int active;
+-
+ 	ssd->titlebar.tree = wlr_scene_tree_create(ssd->tree);
++	add_scene_part(LAB_SSD_PART_TITLEBAR, view, &ssd->tree->node);
+ 
+-	struct ssd_sub_tree *subtree;
+-	FOR_EACH_STATE(ssd, subtree) {
++	enum ssd_active_state active;
++	FOR_EACH_ACTIVE_STATE(active) {
++		struct ssd_titlebar_subtree *subtree = &ssd->titlebar.subtrees[active];
+ 		subtree->tree = wlr_scene_tree_create(ssd->titlebar.tree);
+-		parent = subtree->tree;
+-		active = (subtree == &ssd->titlebar.active) ?
+-			THEME_ACTIVE : THEME_INACTIVE;
+-		titlebar_fill = &theme->window[active].titlebar_fill->base;
+-		corner_top_left = &theme->window[active].corner_top_left_normal->base;
+-		corner_top_right = &theme->window[active].corner_top_right_normal->base;
++		struct wlr_scene_tree *parent = subtree->tree;
+ 		wlr_scene_node_set_enabled(&parent->node, active);
+ 		wlr_scene_node_set_position(&parent->node, 0, -theme->titlebar_height);
+-		wl_list_init(&subtree->parts);
++
++		struct wlr_buffer *titlebar_fill =
++			&theme->window[active].titlebar_fill->base;
++		struct wlr_buffer *corner_top_left =
++			&theme->window[active].corner_top_left_normal->base;
++		struct wlr_buffer *corner_top_right =
++			&theme->window[active].corner_top_right_normal->base;
+ 
+ 		/* Background */
+-		struct wlr_scene_buffer *bg_scene_buffer =
+-			wlr_scene_buffer_create(parent, titlebar_fill);
++		subtree->bar = wlr_scene_buffer_create(parent, titlebar_fill);
+ 		/*
+ 		 * Work around the wlroots/pixman bug that widened 1px buffer
+ 		 * becomes translucent when bilinear filtering is used.
+@@ -68,18 +59,25 @@ ssd_titlebar_create(struct ssd *ssd)
+ 		 */
+ 		if (wlr_renderer_is_pixman(view->server->renderer)) {
+ 			wlr_scene_buffer_set_filter_mode(
+-				bg_scene_buffer, WLR_SCALE_FILTER_NEAREST);
++				subtree->bar, WLR_SCALE_FILTER_NEAREST);
+ 		}
+-		struct ssd_part *bg_part =
+-			add_scene_part(&subtree->parts, LAB_SSD_PART_TITLEBAR);
+-		bg_part->node = &bg_scene_buffer->node;
+-		wlr_scene_node_set_position(bg_part->node, corner_width, 0);
++		wlr_scene_node_set_position(&subtree->bar->node, corner_width, 0);
+ 
+-		add_scene_buffer(&subtree->parts, LAB_SSD_PART_TITLEBAR_CORNER_LEFT, parent,
+-			corner_top_left, -rc.theme->border_width, -rc.theme->border_width);
+-		add_scene_buffer(&subtree->parts, LAB_SSD_PART_TITLEBAR_CORNER_RIGHT, parent,
+-			corner_top_right, width - corner_width,
+-			-rc.theme->border_width);
++		subtree->corner_left = wlr_scene_buffer_create(parent, corner_top_left);
++		wlr_scene_node_set_position(&subtree->corner_left->node,
++			-rc.theme->border_width, -rc.theme->border_width);
++
++		subtree->corner_right = wlr_scene_buffer_create(parent, corner_top_right);
++		wlr_scene_node_set_position(&subtree->corner_right->node,
++			width - corner_width, -rc.theme->border_width);
++
++		/* Title */
++		subtree->title = scaled_font_buffer_create_for_titlebar(
++			subtree->tree, theme->titlebar_height,
++			theme->window[active].titlebar_pattern);
++		assert(subtree->title);
++		add_scene_part(LAB_SSD_PART_TITLE,
++			view, &subtree->title->scene_buffer->node);
+ 
+ 		/* Buttons */
+ 		struct title_button *b;
+@@ -88,10 +86,13 @@ ssd_titlebar_create(struct ssd *ssd)
+ 		/* Center vertically within titlebar */
+ 		int y = (theme->titlebar_height - theme->window_button_height) / 2;
+ 
++		wl_list_init(&subtree->buttons_left);
++		wl_list_init(&subtree->buttons_right);
++
+ 		wl_list_for_each(b, &rc.title_buttons_left, link) {
+ 			struct lab_img **imgs =
+ 				theme->window[active].button_imgs[b->type];
+-			add_scene_button(&subtree->parts, b->type, parent,
++			add_scene_button(&subtree->buttons_left, b->type, parent,
+ 				imgs, x, y, view);
+ 			x += theme->window_button_width + theme->window_button_spacing;
+ 		}
+@@ -101,10 +102,10 @@ ssd_titlebar_create(struct ssd *ssd)
+ 			x -= theme->window_button_width + theme->window_button_spacing;
+ 			struct lab_img **imgs =
+ 				theme->window[active].button_imgs[b->type];
+-			add_scene_button(&subtree->parts, b->type, parent,
++			add_scene_button(&subtree->buttons_right, b->type, parent,
+ 				imgs, x, y, view);
+ 		}
+-	} FOR_EACH_END
++	}
+ 
+ 	update_visible_buttons(ssd);
+ 
+@@ -159,56 +160,52 @@ set_squared_corners(struct ssd *ssd, bool enable)
+ 	int corner_width = ssd_get_corner_width();
+ 	struct theme *theme = view->server->theme;
+ 
+-	struct ssd_part *part;
+-	struct ssd_sub_tree *subtree;
+ 	int x = enable ? 0 : corner_width;
+ 
+-	FOR_EACH_STATE(ssd, subtree) {
+-		part = ssd_get_part(&subtree->parts, LAB_SSD_PART_TITLEBAR);
+-		wlr_scene_node_set_position(part->node, x, 0);
+-		wlr_scene_buffer_set_dest_size(
+-			wlr_scene_buffer_from_node(part->node),
++	enum ssd_active_state active;
++	FOR_EACH_ACTIVE_STATE(active) {
++		struct ssd_titlebar_subtree *subtree = &ssd->titlebar.subtrees[active];
++
++		wlr_scene_node_set_position(&subtree->bar->node, x, 0);
++		wlr_scene_buffer_set_dest_size(subtree->bar,
+ 			MAX(width - 2 * x, 0), theme->titlebar_height);
+ 
+-		part = ssd_get_part(&subtree->parts, LAB_SSD_PART_TITLEBAR_CORNER_LEFT);
+-		wlr_scene_node_set_enabled(part->node, !enable);
++		wlr_scene_node_set_enabled(&subtree->corner_left->node, !enable);
+ 
+-		part = ssd_get_part(&subtree->parts, LAB_SSD_PART_TITLEBAR_CORNER_RIGHT);
+-		wlr_scene_node_set_enabled(part->node, !enable);
++		wlr_scene_node_set_enabled(&subtree->corner_right->node, !enable);
+ 
+ 		/* (Un)round the corner buttons */
+-		struct title_button *title_button;
+-		wl_list_for_each(title_button, &rc.title_buttons_left, link) {
+-			part = ssd_get_part(&subtree->parts, title_button->type);
+-			struct ssd_button *button = node_ssd_button_from_node(part->node);
+-			update_button_state(button, LAB_BS_ROUNDED, !enable);
++		struct ssd_part *part;
++		wl_list_for_each(part, &subtree->buttons_left, link) {
++			update_button_state(part->button, LAB_BS_ROUNDED, !enable);
+ 			break;
+ 		}
+-		wl_list_for_each_reverse(title_button, &rc.title_buttons_right, link) {
+-			part = ssd_get_part(&subtree->parts, title_button->type);
+-			struct ssd_button *button = node_ssd_button_from_node(part->node);
+-			update_button_state(button, LAB_BS_ROUNDED, !enable);
++		wl_list_for_each(part, &subtree->buttons_right, link) {
++			update_button_state(part->button, LAB_BS_ROUNDED, !enable);
+ 			break;
+ 		}
+-	} FOR_EACH_END
++	}
+ }
+ 
+ static void
+ set_alt_button_icon(struct ssd *ssd, enum ssd_part_type type, bool enable)
+ {
+-	struct ssd_part *part;
+-	struct ssd_button *button;
+-	struct ssd_sub_tree *subtree;
+-
+-	FOR_EACH_STATE(ssd, subtree) {
+-		part = ssd_get_part(&subtree->parts, type);
+-		if (!part) {
+-			return;
++	enum ssd_active_state active;
++	FOR_EACH_ACTIVE_STATE(active) {
++		struct ssd_titlebar_subtree *subtree = &ssd->titlebar.subtrees[active];
++
++		struct ssd_part *part;
++		wl_list_for_each(part, &subtree->buttons_left, link) {
++			if (part->type == type) {
++				update_button_state(part->button, LAB_BS_TOGGLED, enable);
++			}
+ 		}
+-
+-		button = node_ssd_button_from_node(part->node);
+-		update_button_state(button, LAB_BS_TOGGLED, enable);
+-	} FOR_EACH_END
++		wl_list_for_each(part, &subtree->buttons_right, link) {
++			if (part->type == type) {
++				update_button_state(part->button, LAB_BS_TOGGLED, enable);
++			}
++		}
++	}
+ }
+ 
+ /*
+@@ -245,27 +242,25 @@ update_visible_buttons(struct ssd *ssd)
+ 		}
+ 	}
+ 
+-	int button_count;
+-	struct ssd_part *part;
+-	struct ssd_sub_tree *subtree;
+-	struct title_button *b;
+-	FOR_EACH_STATE(ssd, subtree) {
+-		button_count = 0;
+-		wl_list_for_each(b, &rc.title_buttons_left, link) {
+-			part = ssd_get_part(&subtree->parts, b->type);
++	enum ssd_active_state active;
++	FOR_EACH_ACTIVE_STATE(active) {
++		struct ssd_titlebar_subtree *subtree = &ssd->titlebar.subtrees[active];
++		int button_count = 0;
++
++		struct ssd_part *part;
++		wl_list_for_each(part, &subtree->buttons_left, link) {
+ 			wlr_scene_node_set_enabled(part->node,
+ 				button_count < button_count_left);
+ 			button_count++;
+ 		}
+ 
+ 		button_count = 0;
+-		wl_list_for_each_reverse(b, &rc.title_buttons_right, link) {
+-			part = ssd_get_part(&subtree->parts, b->type);
++		wl_list_for_each(part, &subtree->buttons_right, link) {
+ 			wlr_scene_node_set_enabled(part->node,
+ 				button_count < button_count_right);
+ 			button_count++;
+ 		}
+-	} FOR_EACH_END
++	}
+ }
+ 
+ void
+@@ -309,34 +304,31 @@ ssd_titlebar_update(struct ssd *ssd)
+ 	/* Center buttons vertically within titlebar */
+ 	int y = (theme->titlebar_height - theme->window_button_height) / 2;
+ 	int x;
+-	struct ssd_part *part;
+-	struct ssd_sub_tree *subtree;
+-	struct title_button *b;
+ 	int bg_offset = maximized || squared ? 0 : corner_width;
+-	FOR_EACH_STATE(ssd, subtree) {
+-		part = ssd_get_part(&subtree->parts, LAB_SSD_PART_TITLEBAR);
+-		wlr_scene_buffer_set_dest_size(
+-			wlr_scene_buffer_from_node(part->node),
++
++	enum ssd_active_state active;
++	FOR_EACH_ACTIVE_STATE(active) {
++		struct ssd_titlebar_subtree *subtree = &ssd->titlebar.subtrees[active];
++		wlr_scene_buffer_set_dest_size(subtree->bar,
+ 			MAX(width - bg_offset * 2, 0), theme->titlebar_height);
+ 
+ 		x = theme->window_titlebar_padding_width;
+-		wl_list_for_each(b, &rc.title_buttons_left, link) {
+-			part = ssd_get_part(&subtree->parts, b->type);
++		struct ssd_part *part;
++		wl_list_for_each(part, &subtree->buttons_left, link) {
+ 			wlr_scene_node_set_position(part->node, x, y);
+ 			x += theme->window_button_width + theme->window_button_spacing;
+ 		}
+ 
+ 		x = width - corner_width;
+-		part = ssd_get_part(&subtree->parts, LAB_SSD_PART_TITLEBAR_CORNER_RIGHT);
+-		wlr_scene_node_set_position(part->node, x, -rc.theme->border_width);
++		wlr_scene_node_set_position(&subtree->corner_right->node,
++			x, -rc.theme->border_width);
+ 
+ 		x = width - theme->window_titlebar_padding_width + theme->window_button_spacing;
+-		wl_list_for_each_reverse(b, &rc.title_buttons_right, link) {
+-			part = ssd_get_part(&subtree->parts, b->type);
++		wl_list_for_each(part, &subtree->buttons_right, link) {
+ 			x -= theme->window_button_width + theme->window_button_spacing;
+ 			wlr_scene_node_set_position(part->node, x, y);
+ 		}
+-	} FOR_EACH_END
++	}
+ 
+ 	ssd_update_title(ssd);
+ }
+@@ -348,19 +340,9 @@ ssd_titlebar_destroy(struct ssd *ssd)
+ 		return;
+ 	}
+ 
+-	struct ssd_sub_tree *subtree;
+-	FOR_EACH_STATE(ssd, subtree) {
+-		ssd_destroy_parts(&subtree->parts);
+-		wlr_scene_node_destroy(&subtree->tree->node);
+-		subtree->tree = NULL;
+-	} FOR_EACH_END
+-
+-	if (ssd->state.title.text) {
+-		zfree(ssd->state.title.text);
+-	}
+-
++	zfree(ssd->state.title.text);
+ 	wlr_scene_node_destroy(&ssd->titlebar.tree->node);
+-	ssd->titlebar.tree = NULL;
++	ssd->titlebar = (struct ssd_titlebar_scene){0};
+ }
+ 
+ /*
+@@ -383,48 +365,40 @@ ssd_update_title_positions(struct ssd *ssd, int offset_left, int offset_right)
+ 	int width = view->current.width;
+ 	int title_bg_width = width - offset_left - offset_right;
+ 
+-	int x, y;
+-	int buffer_height, buffer_width;
+-	struct ssd_part *part;
+-	struct ssd_sub_tree *subtree;
+-	FOR_EACH_STATE(ssd, subtree) {
+-		part = ssd_get_part(&subtree->parts, LAB_SSD_PART_TITLE);
+-		if (!part || !part->node) {
+-			/* view->surface never been mapped */
+-			/* Or we somehow failed to allocate a scaled titlebar buffer */
+-			continue;
+-		}
++	enum ssd_active_state active;
++	FOR_EACH_ACTIVE_STATE(active) {
++		struct ssd_titlebar_subtree *subtree = &ssd->titlebar.subtrees[active];
++		struct scaled_font_buffer *title = subtree->title;
++		int x, y;
+ 
+-		buffer_width = part->buffer ? part->buffer->width : 0;
+-		buffer_height = part->buffer ? part->buffer->height : 0;
+ 		x = offset_left;
+-		y = (theme->titlebar_height - buffer_height) / 2;
++		y = (theme->titlebar_height - title->height) / 2;
+ 
+ 		if (title_bg_width <= 0) {
+-			wlr_scene_node_set_enabled(part->node, false);
++			wlr_scene_node_set_enabled(&title->scene_buffer->node, false);
+ 			continue;
+ 		}
+-		wlr_scene_node_set_enabled(part->node, true);
++		wlr_scene_node_set_enabled(&title->scene_buffer->node, true);
+ 
+ 		if (theme->window_label_text_justify == LAB_JUSTIFY_CENTER) {
+-			if (buffer_width + MAX(offset_left, offset_right) * 2 <= width) {
++			if (title->width + MAX(offset_left, offset_right) * 2 <= width) {
+ 				/* Center based on the full width */
+-				x = (width - buffer_width) / 2;
++				x = (width - title->width) / 2;
+ 			} else {
+ 				/*
+ 				 * Center based on the width between the buttons.
+ 				 * Title jumps around once this is hit but its still
+ 				 * better than to hide behind the buttons on the right.
+ 				 */
+-				x += (title_bg_width - buffer_width) / 2;
++				x += (title_bg_width - title->width) / 2;
+ 			}
+ 		} else if (theme->window_label_text_justify == LAB_JUSTIFY_RIGHT) {
+-			x += title_bg_width - buffer_width;
++			x += title_bg_width - title->width;
+ 		} else if (theme->window_label_text_justify == LAB_JUSTIFY_LEFT) {
+ 			/* TODO: maybe add some theme x padding here? */
+ 		}
+-		wlr_scene_node_set_position(part->node, x, y);
+-	} FOR_EACH_END
++		wlr_scene_node_set_position(&title->scene_buffer->node, x, y);
++	}
+ }
+ 
+ /*
+@@ -434,22 +408,20 @@ ssd_update_title_positions(struct ssd *ssd, int offset_left, int offset_right)
+ static void
+ get_title_offsets(struct ssd *ssd, int *offset_left, int *offset_right)
+ {
+-	struct ssd_sub_tree *subtree = &ssd->titlebar.active;
++	struct ssd_titlebar_subtree *subtree = &ssd->titlebar.subtrees[SSD_ACTIVE];
+ 	int button_width = ssd->view->server->theme->window_button_width;
+ 	int button_spacing = ssd->view->server->theme->window_button_spacing;
+ 	int padding_width = ssd->view->server->theme->window_titlebar_padding_width;
+ 	*offset_left = padding_width;
+ 	*offset_right = padding_width;
+ 
+-	struct title_button *b;
+-	wl_list_for_each(b, &rc.title_buttons_left, link) {
+-		struct ssd_part *part = ssd_get_part(&subtree->parts, b->type);
++	struct ssd_part *part;
++	wl_list_for_each(part, &subtree->buttons_left, link) {
+ 		if (part->node->enabled) {
+ 			*offset_left += button_width + button_spacing;
+ 		}
+ 	}
+-	wl_list_for_each_reverse(b, &rc.title_buttons_right, link) {
+-		struct ssd_part *part = ssd_get_part(&subtree->parts, b->type);
++	wl_list_for_each(part, &subtree->buttons_right, link) {
+ 		if (part->node->enabled) {
+ 			*offset_right += button_width + button_spacing;
+ 		}
+@@ -473,24 +445,18 @@ ssd_update_title(struct ssd *ssd)
+ 	struct ssd_state_title *state = &ssd->state.title;
+ 	bool title_unchanged = state->text && !strcmp(title, state->text);
+ 
+-	const float *text_color;
+ 	const float bg_color[4] = {0, 0, 0, 0}; /* ignored */
+-	struct font *font = NULL;
+-	struct ssd_part *part;
+-	struct ssd_sub_tree *subtree;
+-	struct ssd_state_title_width *dstate;
+-	int active;
+ 
+ 	int offset_left, offset_right;
+ 	get_title_offsets(ssd, &offset_left, &offset_right);
+ 	int title_bg_width = view->current.width - offset_left - offset_right;
+ 
+-	FOR_EACH_STATE(ssd, subtree) {
+-		active = (subtree == &ssd->titlebar.active) ?
+-			THEME_ACTIVE : THEME_INACTIVE;
+-		dstate = active ? &state->active : &state->inactive;
+-		text_color = theme->window[active].label_text_color;
+-		font = active ?  &rc.font_activewindow : &rc.font_inactivewindow;
++	enum ssd_active_state active;
++	FOR_EACH_ACTIVE_STATE(active) {
++		struct ssd_titlebar_subtree *subtree = &ssd->titlebar.subtrees[active];
++		struct ssd_state_title_width *dstate = &state->dstates[active];
++		const float *text_color = theme->window[active].label_text_color;
++		struct font *font = active ? &rc.font_activewindow : &rc.font_inactivewindow;
+ 
+ 		if (title_bg_width <= 0) {
+ 			dstate->truncated = true;
+@@ -503,31 +469,14 @@ ssd_update_title(struct ssd *ssd)
+ 			continue;
+ 		}
+ 
+-		part = ssd_get_part(&subtree->parts, LAB_SSD_PART_TITLE);
+-		if (!part) {
+-			/* Initialize part and wlr_scene_buffer without attaching a buffer */
+-			part = add_scene_part(&subtree->parts, LAB_SSD_PART_TITLE);
+-			part->buffer = scaled_font_buffer_create_for_titlebar(
+-				subtree->tree, theme->titlebar_height,
+-				theme->window[active].titlebar_pattern);
+-			if (part->buffer) {
+-				part->node = &part->buffer->scene_buffer->node;
+-			} else {
+-				wlr_log(WLR_ERROR, "Failed to create title node");
+-			}
+-		}
+-
+-		if (part->buffer) {
+-			scaled_font_buffer_update(part->buffer, title,
+-				title_bg_width, font,
+-				text_color, bg_color);
+-		}
++		scaled_font_buffer_update(subtree->title, title,
++			title_bg_width, font,
++			text_color, bg_color);
+ 
+ 		/* And finally update the cache */
+-		dstate->width = part->buffer ? part->buffer->width : 0;
++		dstate->width = subtree->title->width;
+ 		dstate->truncated = title_bg_width <= dstate->width;
+-
+-	} FOR_EACH_END
++	}
+ 
+ 	if (!title_unchanged) {
+ 		if (state->text) {
+@@ -543,11 +492,14 @@ ssd_update_button_hover(struct wlr_scene_node *node,
+ 		struct ssd_hover_state *hover_state)
+ {
+ 	struct ssd_button *button = NULL;
++	struct view *view = NULL;
+ 
+ 	if (node && node->data) {
+ 		struct node_descriptor *desc = node->data;
+-		if (desc->type == LAB_NODE_DESC_SSD_BUTTON) {
+-			button = node_ssd_button_from_node(node);
++		if (desc->type == LAB_NODE_DESC_SSD_PART) {
++			struct ssd_part *part = node_ssd_part_from_node(node);
++			button = part->button;
++			view = part->view;
+ 			if (button == hover_state->button) {
+ 				/* Cursor is still on the same button */
+ 				return;
+@@ -563,7 +515,7 @@ ssd_update_button_hover(struct wlr_scene_node *node,
+ 	}
+ 	if (button) {
+ 		update_button_state(button, LAB_BS_HOVERD, true);
+-		hover_state->view = button->view;
++		hover_state->view = view;
+ 		hover_state->button = button;
+ 	}
+ }
+@@ -578,5 +530,3 @@ ssd_should_be_squared(struct ssd *ssd)
+ 			|| view->current.width < corner_width * 2)
+ 		&& view->maximized != VIEW_AXIS_BOTH;
+ }
+-
+-#undef FOR_EACH_STATE
+diff --git a/src/ssd/ssd.c b/src/ssd/ssd.c
+index ac37f15b..bd3ab04c 100644
+--- a/src/ssd/ssd.c
++++ b/src/ssd/ssd.c
+@@ -84,8 +84,8 @@ ssd_max_extents(struct view *view)
+  * (generally rc.resize_corner_range, but clipped to view size) of the view
+  * bounds, so check the cursor against the view here.
+  */
+-static enum ssd_part_type
+-get_resizing_type(const struct ssd *ssd, struct wlr_cursor *cursor)
++enum ssd_part_type
++ssd_get_resizing_type(const struct ssd *ssd, struct wlr_cursor *cursor)
+ {
+ 	struct view *view = ssd ? ssd->view : NULL;
+ 	if (!view || !cursor || !view->ssd_enabled || view->fullscreen) {
+@@ -135,75 +135,6 @@ get_resizing_type(const struct ssd *ssd, struct wlr_cursor *cursor)
+ 	return LAB_SSD_NONE;
+ }
+ 
+-enum ssd_part_type
+-ssd_get_part_type(const struct ssd *ssd, struct wlr_scene_node *node,
+-		struct wlr_cursor *cursor)
+-{
+-	if (!node) {
+-		return LAB_SSD_NONE;
+-	} else if (node->type == WLR_SCENE_NODE_BUFFER
+-			&& lab_wlr_surface_from_node(node)) {
+-		return LAB_SSD_CLIENT;
+-	} else if (!ssd) {
+-		return LAB_SSD_NONE;
+-	}
+-
+-	const struct wl_list *part_list = NULL;
+-	struct wlr_scene_tree *grandparent =
+-		node->parent ? node->parent->node.parent : NULL;
+-	struct wlr_scene_tree *greatgrandparent =
+-		grandparent ? grandparent->node.parent : NULL;
+-
+-	/* active titlebar */
+-	if (node->parent == ssd->titlebar.active.tree) {
+-		part_list = &ssd->titlebar.active.parts;
+-	} else if (grandparent == ssd->titlebar.active.tree) {
+-		part_list = &ssd->titlebar.active.parts;
+-	} else if (greatgrandparent == ssd->titlebar.active.tree) {
+-		part_list = &ssd->titlebar.active.parts;
+-
+-	/* extents */
+-	} else if (node->parent == ssd->extents.tree) {
+-		part_list = &ssd->extents.parts;
+-
+-	/* active border */
+-	} else if (node->parent == ssd->border.active.tree) {
+-		part_list = &ssd->border.active.parts;
+-
+-	/* inactive titlebar */
+-	} else if (node->parent == ssd->titlebar.inactive.tree) {
+-		part_list = &ssd->titlebar.inactive.parts;
+-	} else if (grandparent == ssd->titlebar.inactive.tree) {
+-		part_list = &ssd->titlebar.inactive.parts;
+-	} else if (greatgrandparent == ssd->titlebar.inactive.tree) {
+-		part_list = &ssd->titlebar.inactive.parts;
+-
+-	/* inactive border */
+-	} else if (node->parent == ssd->border.inactive.tree) {
+-		part_list = &ssd->border.inactive.parts;
+-	}
+-
+-	enum ssd_part_type part_type = LAB_SSD_NONE;
+-
+-	if (part_list) {
+-		struct ssd_part *part;
+-		wl_list_for_each(part, part_list, link) {
+-			if (node == part->node) {
+-				part_type = part->type;
+-				break;
+-			}
+-		}
+-	}
+-
+-	if (part_type == LAB_SSD_NONE) {
+-		return part_type;
+-	}
+-
+-	/* Perform cursor-based context checks */
+-	enum ssd_part_type resizing_type = get_resizing_type(ssd, cursor);
+-	return resizing_type != LAB_SSD_NONE ? resizing_type : part_type;
+-}
+-
+ uint32_t
+ ssd_resize_edges(enum ssd_part_type type)
+ {
+@@ -237,6 +168,7 @@ ssd_create(struct view *view, bool active)
+ 
+ 	ssd->view = view;
+ 	ssd->tree = wlr_scene_tree_create(view->scene_tree);
++	add_scene_part(LAB_SSD_NONE, view, &ssd->tree->node);
+ 	wlr_scene_node_lower_to_bottom(&ssd->tree->node);
+ 	ssd->titlebar.height = view->server->theme->titlebar_height;
+ 	ssd_shadow_create(ssd);
+@@ -431,17 +363,19 @@ ssd_set_active(struct ssd *ssd, bool active)
+ 	if (!ssd) {
+ 		return;
+ 	}
+-	wlr_scene_node_set_enabled(&ssd->border.active.tree->node, active);
+-	wlr_scene_node_set_enabled(&ssd->titlebar.active.tree->node, active);
+-	if (ssd->shadow.active.tree) {
++	enum ssd_active_state active_state;
++	FOR_EACH_ACTIVE_STATE(active_state) {
+ 		wlr_scene_node_set_enabled(
+-			&ssd->shadow.active.tree->node, active);
+-	}
+-	wlr_scene_node_set_enabled(&ssd->border.inactive.tree->node, !active);
+-	wlr_scene_node_set_enabled(&ssd->titlebar.inactive.tree->node, !active);
+-	if (ssd->shadow.inactive.tree) {
++			&ssd->border.subtrees[active_state].tree->node,
++			active == active_state);
+ 		wlr_scene_node_set_enabled(
+-			&ssd->shadow.inactive.tree->node, !active);
++			&ssd->titlebar.subtrees[active_state].tree->node,
++			active == active_state);
++		if (ssd->shadow.subtrees[active_state].tree) {
++			wlr_scene_node_set_enabled(
++				&ssd->shadow.subtrees[active_state].tree->node,
++				active == active_state);
++		}
+ 	}
+ }
+ 
+@@ -467,10 +401,7 @@ ssd_enable_keybind_inhibit_indicator(struct ssd *ssd, bool enable)
+ 	float *color = enable
+ 		? rc.theme->window_toggled_keybinds_color
+ 		: rc.theme->window[THEME_ACTIVE].border_color;
+-
+-	struct ssd_part *part = ssd_get_part(&ssd->border.active.parts, LAB_SSD_PART_TOP);
+-	struct wlr_scene_rect *rect = wlr_scene_rect_from_node(part->node);
+-	wlr_scene_rect_set_color(rect, color);
++	wlr_scene_rect_set_color(ssd->border.subtrees[SSD_ACTIVE].top, color);
+ }
+ 
+ struct ssd_hover_state *
+@@ -480,15 +411,15 @@ ssd_hover_state_new(void)
+ }
+ 
+ enum ssd_part_type
+-ssd_button_get_type(const struct ssd_button *button)
++ssd_part_get_type(const struct ssd_part *part)
+ {
+-	return button ? button->type : LAB_SSD_NONE;
++	return part ? part->type : LAB_SSD_NONE;
+ }
+ 
+ struct view *
+-ssd_button_get_view(const struct ssd_button *button)
++ssd_part_get_view(const struct ssd_part *part)
+ {
+-	return button ? button->view : NULL;
++	return part ? part->view : NULL;
+ }
+ 
+ bool
+@@ -509,17 +440,17 @@ ssd_debug_get_node_name(const struct ssd *ssd, struct wlr_scene_node *node)
+ 	if (node == &ssd->tree->node) {
+ 		return "view->ssd";
+ 	}
+-	if (node == &ssd->titlebar.active.tree->node) {
+-		return "titlebar.active";
++	if (node == &ssd->titlebar.subtrees[SSD_ACTIVE].tree->node) {
++		return "titlebar.subtrees[ACTIVE]";
+ 	}
+-	if (node == &ssd->titlebar.inactive.tree->node) {
+-		return "titlebar.inactive";
++	if (node == &ssd->titlebar.subtrees[SSD_INACTIVE].tree->node) {
++		return "titlebar.subtrees[INACTIVE]";
+ 	}
+-	if (node == &ssd->border.active.tree->node) {
+-		return "border.active";
++	if (node == &ssd->border.subtrees[SSD_ACTIVE].tree->node) {
++		return "border.subtrees[ACTIVE]";
+ 	}
+-	if (node == &ssd->border.inactive.tree->node) {
+-		return "border.inactive";
++	if (node == &ssd->border.subtrees[SSD_INACTIVE].tree->node) {
++		return "border.subtrees[INACTIVE]";
+ 	}
+ 	if (node == &ssd->extents.tree->node) {
+ 		return "extents";
